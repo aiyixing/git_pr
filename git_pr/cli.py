@@ -468,5 +468,143 @@ def full_cmd(ctx, directory, title, merge, method):
     print_json(result)
 
 
+@cli.command('delete-repo', context_settings=CONTEXT_SETTINGS)
+@click.argument('repo_name')
+@click.pass_context
+def delete_repo_cmd(ctx, repo_name):
+    """
+    删除GitHub远程仓库
+    
+    \b
+    参数说明:
+      REPO_NAME  仓库名（不是完整路径，只是目录名）
+    
+    \b
+    使用示例:
+      # 删除名为comments的仓库
+      gitpr delete-repo comments
+    
+    \b
+    返回JSON示例:
+      {
+        "success": true,
+        "repo_name": "comments",
+        "username": "myname",
+        "message": "仓库 'myname/comments' 已成功删除"
+      }
+    """
+    api = ctx.obj['api']
+    result = api.delete_repository(repo_name)
+    print_json(result)
+
+
+@cli.command('auto-pr', context_settings=CONTEXT_SETTINGS)
+@click.argument('directory', type=click.Path(exists=True, file_okay=False, resolve_path=True))
+@click.argument('title')
+@click.option('--base', 'base_branch', default=None, 
+              help='目标分支名（默认: 配置的默认分支）')
+@click.option('--head', 'head_branch', default=None, 
+              help='源分支名（默认: feature/init）')
+@click.option('--merge', is_flag=True, default=False,
+              help='创建PR后自动合并')
+@click.option('--method', 'merge_method', 
+              type=click.Choice(['merge', 'squash', 'rebase']), 
+              default='merge',
+              help='合并方式 (merge/squash/rebase)')
+@click.option('--force', 'force_clean', is_flag=True, default=False,
+              help='强制清理本地.git目录（谨慎使用！会删除所有git历史）')
+@click.pass_context
+def auto_pr_cmd(ctx, directory, title, base_branch, head_branch, merge, merge_method, force_clean):
+    """
+    自动完成完整PR流程（一条命令搞定）
+    
+    这个命令会自动完成所有步骤，确保最终能创建一个PR。
+    它会自动创建两个不同的分支，分别提交不同的内容，然后创建PR。
+    
+    注意：默认不会删除现有的.git目录，而是智能检查现有分支状态。
+    如果需要完全重新开始，可以使用 --force 选项。
+    
+    \b
+    参数说明:
+      DIRECTORY   本地目录路径
+      TITLE       标题，用于commit message和PR标题
+      --base      目标分支名（默认: 配置的默认分支，如master/main）
+      --head      源分支名（默认: feature/init）
+      --merge     添加此标志后，创建PR后会自动合并
+      --method    合并方式 (merge/squash/rebase)，仅在--merge时有效
+      --force     强制清理本地.git目录（谨慎使用！会删除所有git历史）
+    
+    \b
+    使用示例:
+      # 基础使用（智能检查现有状态）
+      gitpr auto-pr C:\\projects\\myproject "初始化项目"
+      
+      # 指定分支
+      gitpr auto-pr C:\\projects\\myproject "新功能" --base master --head develop
+      
+      # 创建PR后自动合并
+      gitpr auto-pr . "快速发布" --merge
+      
+      # 强制完全重新开始（删除现有.git）
+      gitpr auto-pr . "重新初始化" --force
+      
+      # 使用squash合并
+      gitpr auto-pr . "修复bug" --merge --method squash
+    
+    \b
+    自动执行流程:
+      1. 检查现有.git目录（--force时才删除）
+      2. 创建GitHub远程仓库
+      3. 检查现有分支状态
+      4. 如果没有基础分支，在目标分支（如master）上做第一次提交
+      5. 如果没有源分支，创建源分支（如feature/init）
+      6. 在源分支上做第二次提交（创建标记文件确保有差异）
+      7. 推送两个分支到远程
+      8. 创建Pull Request: 源分支 -> 目标分支
+      9. 如果使用了--merge，则自动合并PR
+    
+    \b
+    返回JSON示例:
+      {
+        "success": true,
+        "repo_name": "myproject",
+        "repo_url": "https://github.com/myname/myproject",
+        "pr_number": 1,
+        "pr_title": "初始化项目",
+        "pr_url": "https://github.com/myname/myproject/pull/1",
+        "pr_state": "open",
+        "step_info": {
+          "base_branch": "master",
+          "head_branch": "feature/init",
+          "title": "初始化项目"
+        },
+        "branch_status": {
+          "status": "已有git仓库",
+          "base_has_commits": true,
+          "head_has_commits": false
+        },
+        "steps": [
+          "创建仓库: 成功",
+          "检查分支状态: 已有git仓库",
+          "跳过初始化提交: 已有基础分支",
+          "功能提交 (feature/init): 成功",
+          "创建PR: 成功"
+        ],
+        "message": "自动PR流程完成: feature/init -> master"
+      }
+    """
+    api = ctx.obj['api']
+    result = api.auto_pr_workflow(
+        directory, 
+        title, 
+        base_branch=base_branch,
+        head_branch=head_branch,
+        merge=merge,
+        merge_method=merge_method,
+        force_clean=force_clean
+    )
+    print_json(result)
+
+
 if __name__ == '__main__':
     cli()
