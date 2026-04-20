@@ -663,3 +663,338 @@ class GitHubAPI:
 
         result["steps"] = steps
         return result
+
+    def delete_repository(self, repo_name: str):
+        if not self.g:
+            return {
+                "success": False,
+                "error": "GitHub未配置。请先运行 'gitpr config'。"
+            }
+
+        username = self._get_github_username()
+        if not username:
+            username = self._config_username
+
+        try:
+            repo = self.g.get_repo(f"{username}/{repo_name}")
+            repo.delete()
+            
+            return {
+                "success": True,
+                "repo_name": repo_name,
+                "username": username,
+                "message": f"仓库 '{username}/{repo_name}' 已成功删除"
+            }
+        except GithubException as e:
+            if e.status == 404:
+                return {
+                    "success": False,
+                    "error": f"仓库 '{username}/{repo_name}' 不存在。",
+                    "repo_name": repo_name,
+                    "username": username
+                }
+            return {
+                "success": False,
+                "error": f"GitHub API错误: {e.data.get('message', str(e))}",
+                "repo_name": repo_name,
+                "username": username
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e),
+                "repo_name": repo_name
+            }
+
+    def auto_pr_workflow(self, directory_path: str, title: str, 
+                          base_branch: str = None, 
+                          head_branch: str = None,
+                          merge: bool = False,
+                          merge_method: str = "merge",
+                          force_clean: bool = False):
+        dir_path = Path(directory_path).resolve()
+        repo_name = dir_path.name
+
+        steps = []
+        results = {}
+
+        username = self._get_github_username()
+        if not username:
+            username = self._config_username
+
+        if base_branch is None:
+            base_branch = self.default_branch
+        if head_branch is None:
+            head_branch = "feature/init"
+
+        step_info = {
+            "base_branch": base_branch,
+            "head_branch": head_branch,
+            "title": title
+        }
+
+        git_dir = dir_path / ".git"
+        git_exists = git_dir.exists()
+
+        if force_clean and git_exists:
+            try:
+                import shutil
+                shutil.rmtree(git_dir)
+                steps.append("强制清理本地git: 成功")
+                git_exists = False
+            except Exception as e:
+                steps.append(f"强制清理本地git: 失败 ({e})")
+                return {
+                    "success": False,
+                    "error": f"无法强制清理本地.git目录: {e}",
+                    "suggestion": "请手动删除 .git 目录后重试，或者不使用 --force 选项",
+                    "steps": steps,
+                    "step_info": step_info
+                }
+
+        create_result = self.create_repository(directory_path)
+        results["create_repo"] = create_result
+        steps.append(f"创建仓库: {'成功' if create_result['success'] else '失败'}")
+        
+        if not create_result["success"]:
+            error_lower = create_result.get("error", "").lower()
+            if "already exists" not in error_lower and "已存在" not in error_lower:
+                return {
+                    "success": False,
+                    "error": f"创建仓库失败: {create_result['error']}",
+                    "steps": steps,
+                    "results": results,
+                    "step_info": step_info
+                }
+
+        branch_status = self._check_branches(dir_path, base_branch, head_branch)
+        steps.append(f"检查分支状态: {branch_status['status']}")
+        
+        if branch_status["need_init"]:
+            init_commit_msg = f"初始化: {title}"
+            init_commit_result = self._auto_commit_and_push(
+                dir_path, 
+                base_branch, 
+                init_commit_msg, 
+                is_initial=True
+            )
+            results["init_commit"] = init_commit_result
+            steps.append(f"初始化提交 ({base_branch}): {'成功' if init_commit_result['success'] else '失败'}")
+            
+            if not init_commit_result["success"]:
+                return {
+                    "success": False,
+                    "error": f"初始化提交失败: {init_commit_result.get('error', '未知错误')}",
+                    "steps": steps,
+                    "results": results,
+                    "step_info": step_info
+                }
+        else:
+            steps.append(f"跳过初始化提交: {branch_status.get('reason', '已有基础分支')}")
+
+        if branch_status["need_head_branch"] or not branch_status["head_has_commits"]:
+            feature_commit_msg = f"功能: {title}"
+            feature_commit_result = self._auto_commit_and_push(
+                dir_path, 
+                head_branch, 
+                feature_commit_msg, 
+                is_initial=False,
+                base_branch=base_branch
+            )
+            results["feature_commit"] = feature_commit_result
+            steps.append(f"功能提交 ({head_branch}): {'成功' if feature_commit_result['success'] else '失败'}")
+            
+            if not feature_commit_result["success"]:
+                return {
+                    "success": False,
+                    "error": f"功能提交失败: {feature_commit_result.get('error', '未知错误')}",
+                    "steps": steps,
+                    "results": results,
+                    "step_info": step_info
+                }
+        else:
+            steps.append(f"跳过功能提交: 源分支已存在且有提交")
+
+        pr_result = self.create_pull_request(
+            directory_path, 
+            title, 
+            head_branch=head_branch, 
+            base_branch=base_branch
+        )
+        results["create_pr"] = pr_result
+        steps.append(f"创建PR: {'成功' if pr_result['success'] else '失败'}")
+        
+        if not pr_result["success"]:
+            return {
+                "success": False,
+                "error": f"创建PR失败: {pr_result.get('error', '未知错误')}",
+                "steps": steps,
+                "results": results,
+                "step_info": step_info,
+                "branch_status": branch_status
+            }
+
+        result = {
+            "success": True,
+            "repo_name": repo_name,
+            "repo_url": create_result.get("repo_url") or f"https://github.com/{username}/{repo_name}",
+            "pr_number": pr_result["pr_number"],
+            "pr_title": pr_result["pr_title"],
+            "pr_url": pr_result["pr_url"],
+            "pr_state": pr_result["pr_state"],
+            "username": username,
+            "step_info": step_info,
+            "branch_status": branch_status,
+            "steps": steps,
+            "results": results,
+            "message": f"自动PR流程完成: {head_branch} -> {base_branch}"
+        }
+
+        if merge:
+            merge_result = self.merge_pull_request(directory_path, pr_result["pr_number"], merge_method)
+            results["merge"] = merge_result
+            steps.append(f"合并PR: {'成功' if merge_result['success'] else '失败'}")
+            result["merge_result"] = merge_result
+            
+            if merge_result["success"]:
+                result["message"] += " -> PR合并"
+            else:
+                result["merge_error"] = merge_result.get("error")
+                result["message"] += " -> PR合并失败"
+
+        return result
+
+    def _check_branches(self, dir_path: Path, base_branch: str, head_branch: str):
+        git_dir = dir_path / ".git"
+        if not git_dir.exists():
+            return {
+                "status": "无git仓库",
+                "need_init": True,
+                "need_head_branch": True,
+                "base_has_commits": False,
+                "head_has_commits": False
+            }
+
+        branches_result = self._run_git_command(["branch", "-a"], cwd=str(dir_path))
+        branches_output = branches_result.get("output", "") if branches_result["success"] else ""
+        
+        base_exists = base_branch in branches_output
+        head_exists = head_branch in branches_output
+        
+        base_has_commits = False
+        head_has_commits = False
+        
+        if base_exists:
+            log_result = self._run_git_command(["log", "-n", "1", base_branch], cwd=str(dir_path))
+            base_has_commits = log_result["success"]
+        
+        if head_exists:
+            log_result = self._run_git_command(["log", "-n", "1", head_branch], cwd=str(dir_path))
+            head_has_commits = log_result["success"]
+        
+        return {
+            "status": "已有git仓库",
+            "need_init": not base_has_commits,
+            "need_head_branch": not head_exists or not head_has_commits,
+            "base_exists": base_exists,
+            "head_exists": head_exists,
+            "base_has_commits": base_has_commits,
+            "head_has_commits": head_has_commits,
+            "reason": f"基础分支({base_branch}): {'有提交' if base_has_commits else '无提交'}, 源分支({head_branch}): {'有提交' if head_has_commits else '无提交'}"
+        }
+
+    def _auto_commit_and_push(self, dir_path: Path, branch_name: str, 
+                               commit_message: str, is_initial: bool = False,
+                               base_branch: str = None):
+        try:
+            if is_initial:
+                init_result = self._run_git_command(["init"], cwd=str(dir_path))
+                if not init_result["success"] and "already exists" not in init_result["error"]:
+                    return {"success": False, "error": f"git init失败: {init_result['error']}"}
+
+            current_branch_result = self._run_git_command(["branch", "--show-current"], cwd=str(dir_path))
+            current_branch = current_branch_result["output"] if current_branch_result["success"] else None
+
+            if is_initial or not current_branch:
+                checkout_result = self._run_git_command(["checkout", "-b", branch_name], cwd=str(dir_path))
+                if not checkout_result["success"]:
+                    return {"success": False, "error": f"创建分支失败: {checkout_result['error']}"}
+            else:
+                if base_branch:
+                    checkout_base_result = self._run_git_command(["checkout", base_branch], cwd=str(dir_path))
+                    if not checkout_base_result["success"]:
+                        return {"success": False, "error": f"切换到基础分支失败: {checkout_base_result['error']}"}
+
+                branch_exists_result = self._run_git_command(["branch", "-a"], cwd=str(dir_path))
+                if branch_exists_result["success"] and branch_name in branch_exists_result["output"]:
+                    checkout_result = self._run_git_command(["checkout", branch_name], cwd=str(dir_path))
+                    if not checkout_result["success"]:
+                        return {"success": False, "error": f"切换分支失败: {checkout_result['error']}"}
+                else:
+                    checkout_result = self._run_git_command(["checkout", "-b", branch_name], cwd=str(dir_path))
+                    if not checkout_result["success"]:
+                        return {"success": False, "error": f"创建分支失败: {checkout_result['error']}"}
+
+            timestamp_file = dir_path / f".gitpr_{branch_name.replace('/', '_')}_marker.txt"
+            timestamp_content = f"Branch: {branch_name}\nCommit: {commit_message}\nTime: {os.popen('date /t').read().strip()} {os.popen('time /t').read().strip()}"
+            
+            try:
+                with open(timestamp_file, 'w', encoding='utf-8') as f:
+                    f.write(timestamp_content)
+            except Exception as e:
+                return {"success": False, "error": f"创建标记文件失败: {e}"}
+
+            add_result = self._run_git_command(["add", "."], cwd=str(dir_path))
+            if not add_result["success"]:
+                return {"success": False, "error": f"添加文件失败: {add_result['error']}"}
+
+            commit_result = self._run_git_command(
+                ["commit", "-m", commit_message],
+                cwd=str(dir_path)
+            )
+            
+            if not commit_result["success"]:
+                if "nothing to commit" in commit_result["error"] or "nothing added to commit" in commit_result["error"]:
+                    readme_file = dir_path / "README.md"
+                    readme_content = f"# {dir_path.name}\n\n自动创建: {commit_message}\n"
+                    try:
+                        with open(readme_file, 'w', encoding='utf-8') as f:
+                            f.write(readme_content)
+                    except:
+                        pass
+                    
+                    add_result2 = self._run_git_command(["add", "."], cwd=str(dir_path))
+                    if add_result2["success"]:
+                        commit_result2 = self._run_git_command(
+                            ["commit", "-m", commit_message],
+                            cwd=str(dir_path)
+                        )
+                        if commit_result2["success"]:
+                            commit_result = commit_result2
+            
+            if not commit_result["success"]:
+                if "nothing to commit" in commit_result["error"] or "nothing added to commit" in commit_result["error"]:
+                    return {
+                        "success": True,
+                        "message": "没有需要提交的更改",
+                        "branch": branch_name
+                    }
+                return {"success": False, "error": f"提交失败: {commit_result['error']}"}
+
+            push_result = self._run_git_command(
+                ["push", "-u", "origin", branch_name],
+                cwd=str(dir_path)
+            )
+            
+            if not push_result["success"]:
+                return {"success": False, "error": f"推送失败: {push_result['error']}"}
+
+            return {
+                "success": True,
+                "message": f"提交并推送成功: {commit_message}",
+                "branch": branch_name,
+                "commit_message": commit_message
+            }
+
+        except Exception as e:
+            return {"success": False, "error": str(e)}
