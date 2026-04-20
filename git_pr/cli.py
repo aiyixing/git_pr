@@ -89,7 +89,8 @@ def status_cmd(ctx):
     """
     查看当前配置状态
     
-    检查GitHub配置是否完整，包括TOKEN和用户名是否已设置。
+    检查GitHub配置是否完整，包括TOKEN有效性和用户名正确性。
+    会自动检测从TOKEN获取的用户名，并与配置的用户名对比。
     
     \b
     使用示例:
@@ -100,19 +101,55 @@ def status_cmd(ctx):
       {
         "success": true,
         "configured": true,
-        "username": "myname",
+        "config_username": "myname",
+        "token_username": "myname",
+        "username_matches": true,
         "default_branch": "main",
-        "token_set": true
+        "token_set": true,
+        "token_valid": true
       }
     """
     config_manager = ctx.obj['config']
+    api = ctx.obj['api']
+    
+    config_username = config_manager.get_github_username()
+    token_set = bool(config_manager.get_github_token())
+    
+    token_username = None
+    token_valid = False
+    username_matches = False
+    warnings = []
+    
+    if token_set:
+        github_user = api._get_github_user()
+        if github_user:
+            token_valid = True
+            token_username = github_user.login
+            username_matches = (token_username == config_username)
+    
+    if config_username and "@" in config_username:
+        warnings.append(f"配置的用户名 '{config_username}' 包含@符号，可能是邮箱而不是GitHub用户名。")
+        warnings.append(f"GitHub用户名不应包含@符号，正确的用户名应该是类似 'myname' 这样的格式。")
+    
+    if token_valid and not username_matches:
+        warnings.append(f"从TOKEN获取的用户名 '{token_username}' 与配置的用户名 '{config_username}' 不一致。")
+        warnings.append(f"建议重新运行 'gitpr config'，使用正确的用户名: {token_username}")
+    
     result = {
         "success": True,
         "configured": config_manager.is_configured(),
-        "username": config_manager.get_github_username(),
+        "config_username": config_username,
+        "token_username": token_username,
+        "username_matches": username_matches,
         "default_branch": config_manager.get_default_branch(),
-        "token_set": bool(config_manager.get_github_token())
+        "token_set": token_set,
+        "token_valid": token_valid,
+        "warnings": warnings
     }
+    
+    if warnings:
+        result["suggestion"] = f"请执行 'gitpr config' 重新配置，使用正确的用户名: {token_username if token_username else '你的GitHub用户名'}"
+    
     print_json(result)
 
 
@@ -427,7 +464,7 @@ def full_cmd(ctx, directory, title, merge, method):
       }
     """
     api = ctx.obj['api']
-    result = api.full_workflow(directory, title, merge)
+    result = api.full_workflow(directory, title, merge, method)
     print_json(result)
 
 
