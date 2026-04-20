@@ -10,27 +10,39 @@ class GitHubAPI:
     def __init__(self, config_manager: ConfigManager):
         self.config = config_manager
         self.token = self.config.get_github_token()
-        self._username = self.config.get_github_username()
+        self._config_username = self.config.get_github_username()
         self.default_branch = self.config.get_default_branch()
         self.g = Github(self.token) if self.token else None
         self._github_user = None
-
-    @property
-    def username(self):
-        if self._github_user:
-            return self._github_user.login
-        return self._username
 
     def _get_github_user(self):
         if self._github_user:
             return self._github_user
         if self.g:
             try:
-                self._github_user = self.g.get_user()
+                user = self.g.get_user()
+                _ = user.login
+                self._github_user = user
                 return self._github_user
-            except:
+            except Exception:
+                return None
+        return None
+
+    def _get_github_username(self):
+        user = self._get_github_user()
+        if user:
+            try:
+                return user.login
+            except Exception:
                 pass
         return None
+
+    @property
+    def username(self):
+        token_username = self._get_github_username()
+        if token_username:
+            return token_username
+        return self._config_username
 
     def _run_git_command(self, args, cwd=None):
         try:
@@ -52,45 +64,6 @@ class GitHubAPI:
                 "output": e.stdout.strip(),
                 "error": e.stderr.strip()
             }
-
-    def _parse_remote_url(self, remote_url: str):
-        patterns = [
-            r'^https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?$',
-            r'^git@github\.com:([^/]+)/([^/]+?)(?:\.git)?$',
-            r'^ssh://git@github\.com/([^/]+)/([^/]+?)(?:\.git)?$',
-        ]
-        
-        for pattern in patterns:
-            match = re.match(pattern, remote_url)
-            if match:
-                return {
-                    "username": match.group(1),
-                    "repo_name": match.group(2)
-                }
-        return None
-
-    def _get_username_from_remote(self, dir_path: Path):
-        remote_result = self._run_git_command(["remote", "get-url", "origin"], cwd=str(dir_path))
-        if remote_result["success"] and remote_result["output"]:
-            parsed = self._parse_remote_url(remote_result["output"])
-            if parsed:
-                return parsed["username"]
-        return None
-
-    def _detect_username(self, dir_path: Path = None):
-        github_user = self._get_github_user()
-        if github_user:
-            return github_user.login
-        
-        if dir_path:
-            remote_username = self._get_username_from_remote(dir_path)
-            if remote_username:
-                return remote_username
-        
-        if self._username and "@" not in self._username:
-            return self._username
-        
-        return None
 
     def _validate_git_repo(self, dir_path: Path):
         if not (dir_path / ".git").exists():
@@ -120,19 +93,19 @@ class GitHubAPI:
             return branch_result["output"]
         return None
 
-    def _check_remote_repo_exists(self, repo_name: str, dir_path: Path = None):
-        username = self._detect_username(dir_path)
-        
+    def _check_remote_repo_exists(self, repo_name: str):
+        if not self.g:
+            return {
+                "exists": False,
+                "error": "GitHub未配置。请先运行 'gitpr config'。"
+            }
+
+        username = self._get_github_username()
         if not username:
             return {
                 "exists": False,
-                "error": "无法确定GitHub用户名。",
-                "suggestion": "请确保TOKEN有效，或者检查git remote配置。",
-                "detected_info": {
-                    "config_username": self._username,
-                    "from_token": bool(self._get_github_user()),
-                    "from_remote": bool(self._get_username_from_remote(dir_path) if dir_path else None)
-                }
+                "error": "无法通过TOKEN获取GitHub用户信息。",
+                "suggestion": "请检查TOKEN是否有效，需要repo权限。"
             }
 
         try:
@@ -144,29 +117,12 @@ class GitHubAPI:
             }
         except GithubException as e:
             if e.status == 404:
-                remote_username = self._get_username_from_remote(dir_path) if dir_path else None
-                suggestion_parts = []
-                
-                if self._username and "@" in self._username:
-                    suggestion_parts.append(f"注意: 配置的用户名 '{self._username}' 看起来是邮箱，GitHub用户名不应包含@符号。")
-                
-                if remote_username and remote_username != username:
-                    suggestion_parts.append(f"从remote检测到的用户名: {remote_username}")
-                
-                suggestion_parts.append(f"请执行 'gitpr config' 重新配置正确的用户名。")
-                suggestion_parts.append(f"或者手动检查: git remote -v")
-                
                 return {
                     "exists": False,
                     "error": f"远程仓库 '{username}/{repo_name}' 不存在。",
-                    "suggestion": "\n".join(suggestion_parts),
+                    "suggestion": f"请先执行 'gitpr create-repo' 创建仓库。",
                     "username": username,
-                    "repo_name": repo_name,
-                    "detected_info": {
-                        "config_username": self._username,
-                        "token_username": self._get_github_user().login if self._get_github_user() else None,
-                        "remote_username": remote_username
-                    }
+                    "repo_name": repo_name
                 }
             return {
                 "exists": False,
@@ -185,8 +141,8 @@ class GitHubAPI:
                 "repo_name": repo_name
             }
 
-        github_user = self._get_github_user()
-        if not github_user:
+        user = self._get_github_user()
+        if not user:
             return {
                 "success": False,
                 "error": "无法通过TOKEN获取GitHub用户信息。",
@@ -195,7 +151,7 @@ class GitHubAPI:
             }
 
         try:
-            repo = github_user.create_repo(repo_name, private=False)
+            repo = user.create_repo(repo_name, private=False)
             
             if not (dir_path / ".git").exists():
                 init_result = self._run_git_command(["init"], cwd=str(dir_path))
@@ -222,7 +178,7 @@ class GitHubAPI:
                 "repo_name": repo_name,
                 "repo_url": repo.html_url,
                 "clone_url": repo.clone_url,
-                "username": github_user.login,
+                "username": user.login,
                 "directory": str(dir_path),
                 "message": f"仓库 '{repo_name}' 创建成功。下一步请使用 'gitpr commit' 提交代码。",
                 "next_step": f"gitpr commit {dir_path} \"初始化提交\""
@@ -234,14 +190,14 @@ class GitHubAPI:
                     "success": False,
                     "error": f"仓库 '{repo_name}' 已存在于GitHub。",
                     "repo_name": repo_name,
-                    "username": github_user.login,
+                    "username": user.login,
                     "suggestion": "如果本地目录未关联，请手动执行: git remote add origin <仓库地址>"
                 }
             return {
                 "success": False,
                 "error": f"GitHub API错误: {error_msg}",
                 "repo_name": repo_name,
-                "username": github_user.login
+                "username": user.login
             }
         except Exception as e:
             return {
@@ -295,8 +251,16 @@ class GitHubAPI:
                 "repo_name": repo_name
             }
 
-        current_branch = self._get_current_branch(dir_path) or self.default_branch
+        current_branch = self._get_current_branch(dir_path)
         
+        if not current_branch:
+            return {
+                "success": False,
+                "error": "无法获取当前分支。",
+                "repo_name": repo_name,
+                "suggestion": "请确保仓库有提交记录。"
+            }
+
         push_result = self._run_git_command(
             ["push", "-u", "origin", current_branch],
             cwd=str(dir_path)
@@ -310,14 +274,22 @@ class GitHubAPI:
                 "suggestion": "请检查网络连接、GitHub权限或分支是否存在。"
             }
 
-        username = self._detect_username(dir_path)
+        username = self._get_github_username()
+        branch_info = {
+            "current_branch": current_branch,
+            "default_branch": self.default_branch
+        }
+        
+        if current_branch != self.default_branch:
+            branch_info["warning"] = f"当前分支 '{current_branch}' 与配置的默认分支 '{self.default_branch}' 不同。创建PR时请注意分支设置。"
+
         return {
             "success": True,
             "message": f"提交并推送成功: {commit_message}",
             "commit_message": commit_message,
-            "branch": current_branch,
+            "branch_info": branch_info,
             "repo_name": repo_name,
-            "username": username,
+            "username": username if username else self._config_username,
             "next_step": f"下一步可执行: gitpr create-pr {dir_path} \"{commit_message}\""
         }
 
@@ -348,26 +320,79 @@ class GitHubAPI:
                 "error": "GitHub未配置。请先运行 'gitpr config'。"
             }
 
-        repo_check = self._check_remote_repo_exists(repo_name, dir_path)
+        repo_check = self._check_remote_repo_exists(repo_name)
         if not repo_check["exists"]:
             return {
                 "success": False,
                 "error": repo_check["error"],
                 "suggestion": repo_check.get("suggestion"),
                 "repo_name": repo_name,
-                "detected_info": repo_check.get("detected_info")
+                "username": repo_check.get("username")
             }
 
-        username = repo_check["username"]
+        username = self._get_github_username()
+        if not username:
+            username = self._config_username
 
+        current_branch = self._get_current_branch(dir_path)
+        
         if head_branch is None:
-            head_branch = self._get_current_branch(dir_path) or self.default_branch
+            head_branch = current_branch or self.default_branch
         if base_branch is None:
             base_branch = self.default_branch
+
+        branch_info = {
+            "head_branch": head_branch,
+            "base_branch": base_branch,
+            "current_local_branch": current_branch
+        }
+
+        if head_branch == base_branch:
+            return {
+                "success": False,
+                "error": "源分支和目标分支相同，无法创建Pull Request。",
+                "repo_name": repo_name,
+                "username": username,
+                "branch_info": branch_info,
+                "suggestion": "\n".join([
+                    f"当前配置: head_branch='{head_branch}', base_branch='{base_branch}'",
+                    f"解决方案1: 使用不同的分支，例如: gitpr create-pr {dir_path} \"标题\" --head {head_branch} --base develop",
+                    f"解决方案2: 如果你想快速测试，可以使用 --merge 参数配合 full 命令，它会自动处理。"
+                ])
+            }
 
         try:
             repo = repo_check["repo"]
             
+            try:
+                repo.get_branch(head_branch)
+            except GithubException:
+                return {
+                    "success": False,
+                    "error": f"源分支 '{head_branch}' 在远程仓库不存在。",
+                    "repo_name": repo_name,
+                    "username": username,
+                    "branch_info": branch_info,
+                    "suggestion": f"请先将本地分支推送到远程: git push -u origin {head_branch}"
+                }
+
+            try:
+                repo.get_branch(base_branch)
+            except GithubException:
+                return {
+                    "success": False,
+                    "error": f"目标分支 '{base_branch}' 在远程仓库不存在。",
+                    "repo_name": repo_name,
+                    "username": username,
+                    "branch_info": branch_info,
+                    "suggestion": "\n".join([
+                        f"配置的默认分支是 '{self.default_branch}', 但远程仓库没有这个分支。",
+                        f"你可以: ",
+                        f"  1. 指定存在的分支: gitpr create-pr {dir_path} \"标题\" --base {head_branch}",
+                        f"  2. 或者修改默认分支配置: gitpr config --branch {head_branch}"
+                    ])
+                }
+
             pr = repo.create_pull(
                 title=title,
                 body=f"Pull request created by gitpr CLI\nTitle: {title}",
@@ -381,8 +406,7 @@ class GitHubAPI:
                 "pr_title": pr.title,
                 "pr_url": pr.html_url,
                 "pr_state": pr.state,
-                "head_branch": head_branch,
-                "base_branch": base_branch,
+                "branch_info": branch_info,
                 "repo_name": repo_name,
                 "username": username,
                 "message": f"Pull request 创建成功: #{pr.number}",
@@ -390,22 +414,51 @@ class GitHubAPI:
             }
         except GithubException as e:
             error_msg = e.data.get('message', str(e))
+            errors = e.data.get('errors', [])
+            
+            detailed_errors = []
+            for err in errors:
+                detailed_errors.append(f"{err.get('field', '')}: {err.get('message', '')}")
+            
             suggestion = ""
             
-            if "No commits between" in error_msg:
+            if "No commits between" in error_msg or "does not contain any commits" in error_msg:
                 suggestion = f"源分支 '{head_branch}' 和目标分支 '{base_branch}' 之间没有差异。请确保有新的提交。"
             elif "A pull request already exists" in error_msg:
                 suggestion = "已存在相同分支的Pull Request。请先关闭或合并现有的PR。"
-            elif "Not Found" in error_msg:
-                suggestion = f"请确保分支 '{head_branch}' 已推送到远程仓库。当前检测到的用户名: {username}"
+            elif "Validation Failed" in error_msg:
+                suggestion_parts = [
+                    f"PR创建验证失败。",
+                    f"当前配置: head='{head_branch}' -> base='{base_branch}'",
+                    ""
+                ]
+                if detailed_errors:
+                    suggestion_parts.extend(detailed_errors)
+                else:
+                    display_username = username if username else 'username'
+                    suggestion_parts.extend([
+                        "可能的原因:",
+                        f"  1. 源分支 '{head_branch}' 不存在于远程",
+                        f"  2. 目标分支 '{base_branch}' 不存在于远程",
+                        f"  3. 两个分支之间没有差异",
+                        f"  4. 源分支和目标分支相同",
+                        "",
+                        f"当前本地分支: '{current_branch}'",
+                        f"配置的默认分支: '{self.default_branch}'",
+                        "",
+                        "建议:",
+                        f"  - 如果只有一个分支，使用 full 命令: gitpr full {dir_path} \"标题\" --merge",
+                        f"  - 或者检查远程仓库分支: https://github.com/{display_username}/{repo_name}/branches"
+                    ])
+                suggestion = "\n".join(suggestion_parts)
             
             return {
                 "success": False,
                 "error": f"GitHub API错误: {error_msg}",
                 "repo_name": repo_name,
                 "username": username,
-                "head_branch": head_branch,
-                "base_branch": base_branch,
+                "branch_info": branch_info,
+                "detailed_errors": detailed_errors,
                 "suggestion": suggestion
             }
         except Exception as e:
@@ -425,7 +478,7 @@ class GitHubAPI:
                 "error": "GitHub未配置。请先运行 'gitpr config'。"
             }
 
-        repo_check = self._check_remote_repo_exists(repo_name, dir_path)
+        repo_check = self._check_remote_repo_exists(repo_name)
         if not repo_check["exists"]:
             return {
                 "success": False,
@@ -434,7 +487,9 @@ class GitHubAPI:
                 "pr_number": pr_number
             }
 
-        username = repo_check["username"]
+        username = self._get_github_username()
+        if not username:
+            username = self._config_username
 
         try:
             repo = repo_check["repo"]
@@ -531,6 +586,42 @@ class GitHubAPI:
                 "results": results
             }
 
+        pr_result = None
+        need_merge = merge
+        
+        username = self._get_github_username()
+        if not username:
+            username = self._config_username
+        
+        current_branch = commit_result.get("branch_info", {}).get("current_branch")
+        default_branch = self.default_branch
+        
+        if current_branch and current_branch == default_branch:
+            pr_skip_reason = f"当前分支 '{current_branch}' 与默认分支 '{default_branch}' 相同，跳过PR创建。"
+            steps.append(f"跳过PR创建: 分支相同")
+            
+            result = {
+                "success": True,
+                "repo_name": repo_name,
+                "repo_url": create_result.get("repo_url"),
+                "commit_message": title,
+                "pr_skipped": True,
+                "pr_skip_reason": pr_skip_reason,
+                "username": username,
+                "branch_info": {
+                    "current_branch": current_branch,
+                    "default_branch": default_branch
+                },
+                "steps": steps,
+                "results": results,
+                "message": "工作流完成: 仓库创建 -> 代码提交 (PR跳过: 分支相同)"
+            }
+            
+            if need_merge:
+                result["message"] += " (无需合并)"
+            
+            return result
+
         pr_result = self.create_pull_request(directory_path, title)
         results["create_pr"] = pr_result
         steps.append(f"创建PR: {'成功' if pr_result['success'] else '失败'}")
@@ -552,13 +643,13 @@ class GitHubAPI:
             "pr_title": pr_result["pr_title"],
             "pr_url": pr_result["pr_url"],
             "pr_state": pr_result["pr_state"],
-            "username": pr_result.get("username"),
+            "username": username,
             "steps": steps,
             "results": results,
             "message": "完整工作流完成: 仓库创建 -> 代码提交 -> PR创建"
         }
 
-        if merge:
+        if need_merge:
             merge_result = self.merge_pull_request(directory_path, pr_result["pr_number"], merge_method)
             results["merge"] = merge_result
             steps.append(f"合并PR: {'成功' if merge_result['success'] else '失败'}")

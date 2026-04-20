@@ -28,35 +28,36 @@ def cli(ctx):
 
 
 @cli.command('config', context_settings=CONTEXT_SETTINGS)
-@click.option('--token', prompt='请输入GitHub Personal Access Token', 
+@click.option('--token', default=None, 
               hide_input=True, 
               help='GitHub Personal Access Token (需要repo权限)')
-@click.option('--username', prompt='请输入GitHub用户名', 
+@click.option('--username', default=None, 
               help='GitHub用户名')
-@click.option('--branch', default='main', 
-              help='默认分支名 (默认: main)')
+@click.option('--branch', default=None, 
+              help='默认分支名')
 @click.pass_context
 def config_cmd(ctx, token, username, branch):
     """
     配置GitHub相关信息（TOKEN加密保存）
     
-    首次使用必须先运行此命令配置GitHub认证信息。
-    TOKEN会使用AES加密后保存在本地配置文件中。
+    修改配置时，只需要提供要修改的参数，未提供的参数保留原有值。
     
     \b
     参数说明:
-      --token     GitHub Personal Access Token，需要从GitHub设置中生成
-                  权限要求: repo (完整的仓库访问权限)
+      --token     GitHub Personal Access Token
       --username  GitHub用户名
-      --branch    默认分支名，默认为main
+      --branch    默认分支名
     
     \b
     使用示例:
-      # 交互式配置
-      gitpr config
-      
-      # 命令行参数配置
+      # 首次配置所有参数
       gitpr config --token ghp_xxxxxxxxxxxx --username myname --branch main
+      
+      # 只修改默认分支
+      gitpr config --branch master
+      
+      # 只修改用户名
+      gitpr config --username newname
     
     \b
     返回JSON示例:
@@ -69,16 +70,33 @@ def config_cmd(ctx, token, username, branch):
       }
     """
     config_manager = ctx.obj['config']
-    config_manager.set_github_token(token)
-    config_manager.set_github_username(username)
-    config_manager.set_default_branch(branch)
+    
+    existing_token = config_manager.get_github_token()
+    existing_username = config_manager.get_github_username()
+    existing_branch = config_manager.get_default_branch()
+    
+    new_token = token if token is not None else existing_token
+    new_username = username if username is not None else existing_username
+    new_branch = branch if branch is not None else existing_branch
+    
+    if new_token:
+        config_manager.set_github_token(new_token)
+    if new_username:
+        config_manager.set_github_username(new_username)
+    if new_branch:
+        config_manager.set_default_branch(new_branch)
     
     result = {
         "success": True,
         "message": "配置已保存",
-        "username": username,
-        "default_branch": branch,
-        "token_encrypted": True
+        "username": new_username,
+        "default_branch": new_branch,
+        "token_encrypted": bool(new_token),
+        "changes": {
+            "token": token is not None,
+            "username": username is not None,
+            "branch": branch is not None
+        }
     }
     print_json(result)
 
@@ -89,8 +107,7 @@ def status_cmd(ctx):
     """
     查看当前配置状态
     
-    检查GitHub配置是否完整，包括TOKEN有效性和用户名正确性。
-    会自动检测从TOKEN获取的用户名，并与配置的用户名对比。
+    检查GitHub配置是否完整。
     
     \b
     使用示例:
@@ -101,9 +118,8 @@ def status_cmd(ctx):
       {
         "success": true,
         "configured": true,
-        "config_username": "myname",
-        "token_username": "myname",
-        "username_matches": true,
+        "config_username": "your_username",
+        "token_username": "actual_username",
         "default_branch": "main",
         "token_set": true,
         "token_valid": true
@@ -117,38 +133,22 @@ def status_cmd(ctx):
     
     token_username = None
     token_valid = False
-    username_matches = False
-    warnings = []
     
     if token_set:
         github_user = api._get_github_user()
         if github_user:
             token_valid = True
             token_username = github_user.login
-            username_matches = (token_username == config_username)
-    
-    if config_username and "@" in config_username:
-        warnings.append(f"配置的用户名 '{config_username}' 包含@符号，可能是邮箱而不是GitHub用户名。")
-        warnings.append(f"GitHub用户名不应包含@符号，正确的用户名应该是类似 'myname' 这样的格式。")
-    
-    if token_valid and not username_matches:
-        warnings.append(f"从TOKEN获取的用户名 '{token_username}' 与配置的用户名 '{config_username}' 不一致。")
-        warnings.append(f"建议重新运行 'gitpr config'，使用正确的用户名: {token_username}")
     
     result = {
         "success": True,
         "configured": config_manager.is_configured(),
         "config_username": config_username,
         "token_username": token_username,
-        "username_matches": username_matches,
         "default_branch": config_manager.get_default_branch(),
         "token_set": token_set,
-        "token_valid": token_valid,
-        "warnings": warnings
+        "token_valid": token_valid
     }
-    
-    if warnings:
-        result["suggestion"] = f"请执行 'gitpr config' 重新配置，使用正确的用户名: {token_username if token_username else '你的GitHub用户名'}"
     
     print_json(result)
 
