@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: gitpr
+Version: 1.0.0
+Summary: GitHub PR CLI Tool - 用于管理GitHub仓库和Pull Request
+Author: GitPR CLI
+Requires-Python: >=3.8
+Requires-Dist: click>=8.0.0
+Requires-Dist: pygithub>=1.59.0
+Requires-Dist: cryptography>=41.0.0
+Requires-Dist: python-dotenv>=1.0.0
+Dynamic: author
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

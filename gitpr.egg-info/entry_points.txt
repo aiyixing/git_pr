@@ -1,0 +1,2 @@
+[console_scripts]
+gitpr = git_pr.cli:cli
